@@ -14,7 +14,14 @@ public final class Main {
             "(+ x y)",
             "(* x 5)",
             "(def x 100)",
-            "(+ x y)");
+            "(+ x y)",
+            "(def v [1 2 3])",
+            "(def w (conj v 4))",
+            "w",
+            "v",
+            "(nth w 3)",
+            "(count v)",
+            "(assoc v 0 x)");
 
     private Main() {
     }

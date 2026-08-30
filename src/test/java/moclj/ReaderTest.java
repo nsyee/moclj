@@ -26,8 +26,18 @@ class ReaderTest {
     }
 
     @Test
-    void rejectsUnbalancedParens() {
+    void readsVectorLiterals() {
+        assertEquals(
+                new Form.Vec(List.of(new Form.Num(1), new Form.Vec(List.of(new Form.Sym("x"))))),
+                Reader.readOne("[1 [x]]"));
+        assertEquals(new Form.Vec(List.of()), Reader.readOne("[]"));
+    }
+
+    @Test
+    void rejectsUnbalancedDelimiters() {
         assertThrows(MocljException.class, () -> Reader.readOne("(+ 1 2"));
         assertThrows(MocljException.class, () -> Reader.readOne("+ 1 2)"));
+        assertThrows(MocljException.class, () -> Reader.readOne("[1 2"));
+        assertThrows(MocljException.class, () -> Reader.readOne("1 2]"));
     }
 }
