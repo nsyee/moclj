@@ -4,8 +4,8 @@ import java.lang.classfile.ClassFile;
 import java.lang.classfile.Instruction;
 import java.util.stream.Collectors;
 
-/// Renders the instructions of a compiled form, which is how the generated
-/// `RT.bind` / `RT.get` calls can be inspected from the REPL.
+/// Renders the instructions of a compiled form, which is how the generated Var
+/// caching and the calls into `RT` can be inspected from the REPL.
 public final class Disassembler {
 
     private Disassembler() {
