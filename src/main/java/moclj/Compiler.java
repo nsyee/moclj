@@ -40,6 +40,16 @@ public final class Compiler {
     private static final MethodTypeDesc DEF_DESC = MethodTypeDesc.of(Var.CLASS_DESC, CD_String, CD_Object);
     private static final MethodTypeDesc INVOKE_OP_DESC = MethodTypeDesc.of(CD_Object, CD_String, CD_Object, CD_Object);
     private static final MethodTypeDesc BOX_LONG_DESC = MethodTypeDesc.of(ConstantDescs.CD_Long, CD_long);
+    private static final MethodTypeDesc VECTOR_DESC =
+            MethodTypeDesc.of(PersistentVector.CLASS_DESC, CD_Object.arrayType());
+
+    /// The collection functions reachable by name from source, each compiled to
+    /// an `invokestatic` of the [RT] method of the same name.
+    private static final Map<String, MethodTypeDesc> BUILTINS = Map.of(
+            "conj", MethodTypeDesc.of(PersistentVector.CLASS_DESC, CD_Object, CD_Object),
+            "assoc", MethodTypeDesc.of(PersistentVector.CLASS_DESC, CD_Object, CD_Object, CD_Object),
+            "nth", MethodTypeDesc.of(CD_Object, CD_Object, CD_Object),
+            "count", MethodTypeDesc.of(CD_Object, CD_Object));
 
     private Compiler() {
     }
@@ -134,6 +144,7 @@ public final class Compiler {
             }
             case Form.Num _ -> {
             }
+            case Form.Vec(List<Form> items) -> items.forEach(item -> collectReferences(item, fields));
             case Form.Seq(List<Form> items) when items.isEmpty() ->
                 throw new MocljException("Cannot compile an empty form");
             case Form.Seq(List<Form> items) -> {
@@ -162,14 +173,21 @@ public final class Compiler {
                 code.getstatic(classDesc, varFields.get(name), Var.CLASS_DESC);
                 code.invokevirtual(Var.CLASS_DESC, "deref", Var.DEREF_DESC);
             }
+            case Form.Vec(List<Form> items) -> compileVector(items, code, classDesc, varFields);
             case Form.Seq(List<Form> items) when items.isEmpty() ->
                 throw new MocljException("Cannot compile an empty form");
             case Form.Seq(List<Form> items) -> {
                 if (!(items.getFirst() instanceof Form.Sym(String op))) {
                     throw new MocljException("Can only invoke symbols but got: " + items.getFirst());
                 }
+                List<Form> args = items.subList(1, items.size());
+                MethodTypeDesc builtin = BUILTINS.get(op);
                 if (op.equals("def")) {
                     compileDef(items, code, classDesc, varFields);
+                } else if (op.equals("vector")) {
+                    compileVector(args, code, classDesc, varFields);
+                } else if (builtin != null) {
+                    compileBuiltin(op, builtin, args, code, classDesc, varFields);
                 } else {
                     compileOp(op, items, code, classDesc, varFields);
                 }
@@ -187,6 +205,38 @@ public final class Compiler {
         code.loadConstant(name);
         compileNode(items.get(2), code, classDesc, varFields);
         code.invokestatic(RT.CLASS_DESC, "def", DEF_DESC);
+    }
+
+    /// A `[a b]` literal becomes `RT.vector(new Object[]{<a>, <b>})`, so the
+    /// vector is built when the enclosing form runs, from the values its
+    /// elements evaluate to.
+    private static void compileVector(
+            List<Form> items, CodeBuilder code, ClassDesc classDesc, Map<String, String> varFields) {
+        code.loadConstant(items.size());
+        code.anewarray(CD_Object);
+        for (int i = 0; i < items.size(); i++) {
+            code.dup();
+            code.loadConstant(i);
+            compileNode(items.get(i), code, classDesc, varFields);
+            code.aastore();
+        }
+        code.invokestatic(RT.CLASS_DESC, "vector", VECTOR_DESC);
+    }
+
+    /// `(conj v x)` and its siblings become a direct call of the [RT] method of
+    /// the same name; a collection is just another value on the stack.
+    private static void compileBuiltin(
+            String name,
+            MethodTypeDesc desc,
+            List<Form> args,
+            CodeBuilder code,
+            ClassDesc classDesc,
+            Map<String, String> varFields) {
+        if (args.size() != desc.parameterCount()) {
+            throw new MocljException("Wrong number of args (" + args.size() + ") passed to: " + name);
+        }
+        args.forEach(arg -> compileNode(arg, code, classDesc, varFields));
+        code.invokestatic(RT.CLASS_DESC, name, desc);
     }
 
     /// `(op a b)` becomes `RT.invokeOp("op", <a>, <b>)`.

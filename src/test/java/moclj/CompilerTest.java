@@ -93,6 +93,44 @@ class CompilerTest {
     }
 
     @Test
+    void vectorLiteralsEvaluateTheirElements() {
+        eval("(def x 10)");
+        assertEquals(PersistentVector.of(1L, 10L, PersistentVector.of(2L)), eval("[1 x [2]]"));
+        assertEquals(PersistentVector.EMPTY, eval("[]"));
+        assertEquals("[1 2]", Repl.print(eval("(vector 1 2)")));
+    }
+
+    @Test
+    void collectionFunctionsReturnNewVectors() {
+        eval("(def v [1 2])");
+        assertEquals(PersistentVector.of(1L, 2L, 3L), eval("(conj v 3)"));
+        assertEquals(PersistentVector.of(1L, 9L), eval("(assoc v 1 9)"));
+        assertEquals(PersistentVector.of(1L, 2L), RT.lookupVar("v").deref());
+        assertEquals(2L, eval("(nth v 1)"));
+        assertEquals(2L, eval("(count v)"));
+        assertEquals(true, eval("(= v [1 2])"));
+    }
+
+    @Test
+    void collectionFunctionsRejectWrongArgs() {
+        eval("(def v [1 2])");
+        assertThrows(MocljException.class, () -> eval("(conj v)"));
+        assertThrows(MocljException.class, () -> eval("(count 1)"));
+        assertThrows(MocljException.class, () -> eval("(nth v v)"));
+        assertThrows(IndexOutOfBoundsException.class, () -> eval("(nth v 5)"));
+    }
+
+    @Test
+    void vectorsAreBuiltByCallingTheRuntimeDirectly() {
+        String bytecode = Disassembler.disassemble(Compiler.compile(Reader.readOne("(conj [1] 2)")));
+        assertTrue(bytecode.contains("ANEWARRAY"), bytecode);
+        assertTrue(bytecode.contains("moclj/RT.vector([Ljava/lang/Object;)Lmoclj/PersistentVector;"), bytecode);
+        assertTrue(
+                bytecode.contains("moclj/RT.conj(Ljava/lang/Object;Ljava/lang/Object;)Lmoclj/PersistentVector;"),
+                bytecode);
+    }
+
+    @Test
     void symbolsThatAreNotIdentifiersGetEscapedFieldNames() {
         eval("(def a-b 1)");
         assertEquals(1L, eval("a-b"));

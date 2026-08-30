@@ -2,6 +2,7 @@ package moclj;
 
 import java.lang.constant.ClassDesc;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /// The runtime shared by every compiled class: the intern table mapping names
@@ -37,9 +38,38 @@ public final class RT {
         return var;
     }
 
+    /// The vector holding `items`, the value of a `[...]` literal.
+    public static PersistentVector vector(Object... items) {
+        return PersistentVector.of(items);
+    }
+
+    /// `coll` with `value` appended, a new vector sharing its structure with
+    /// `coll`, which is left untouched.
+    public static PersistentVector conj(Object coll, Object value) {
+        return asVector("conj", coll).conj(value);
+    }
+
+    /// The element of `coll` at `index`.
+    public static Object nth(Object coll, Object index) {
+        return asVector("nth", coll).nth((int) asLong("nth", index));
+    }
+
+    /// `coll` with `index` replaced by `value`, again as a new vector.
+    public static PersistentVector assoc(Object coll, Object index, Object value) {
+        return asVector("assoc", coll).assoc((int) asLong("assoc", index), value);
+    }
+
+    /// The number of elements in `coll`.
+    public static Object count(Object coll) {
+        return (long) asVector("count", coll).size();
+    }
+
     /// Applies a built-in binary operator. A real Clojure would resolve the
     /// operator to an `IFn` and call it through `invokedynamic`.
     public static Object invokeOp(String op, Object a, Object b) {
+        if (op.equals("=")) {
+            return equiv(a, b);
+        }
         long x = asLong(op, a);
         long y = asLong(op, b);
         return switch (op) {
@@ -49,7 +79,6 @@ public final class RT {
             case "/" -> divide(x, y);
             case "<" -> x < y;
             case ">" -> x > y;
-            case "=" -> x == y;
             default -> throw new MocljException("Unknown op: " + op);
         };
     }
@@ -76,5 +105,21 @@ public final class RT {
             return n.longValue();
         }
         throw new MocljException(op + " expects numbers but got: " + value);
+    }
+
+    private static PersistentVector asVector(String fn, Object value) {
+        if (value instanceof PersistentVector v) {
+            return v;
+        }
+        throw new MocljException(fn + " expects a vector but got: " + Repl.print(value));
+    }
+
+    /// Equality across the supported types: numbers compare by value, anything
+    /// else - vectors included - by `equals`.
+    private static boolean equiv(Object a, Object b) {
+        if (a instanceof Number x && b instanceof Number y) {
+            return x.longValue() == y.longValue();
+        }
+        return Objects.equals(a, b);
     }
 }

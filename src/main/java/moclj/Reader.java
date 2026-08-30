@@ -37,25 +37,29 @@ public final class Reader {
     private Form readForm() {
         char c = source.charAt(pos);
         if (c == '(') {
-            return readSeq();
+            return new Form.Seq(readItems('(', ')'));
         }
-        if (c == ')') {
-            throw new MocljException("Unmatched ')' at position " + pos);
+        if (c == '[') {
+            return new Form.Vec(readItems('[', ']'));
+        }
+        if (c == ')' || c == ']') {
+            throw new MocljException("Unmatched '" + c + "' at position " + pos);
         }
         return readAtom();
     }
 
-    private Form readSeq() {
-        pos++; // consume '('
+    /// Reads the forms between `open` and its matching `close`.
+    private List<Form> readItems(char open, char close) {
+        pos++; // consume `open`
         var items = new ArrayList<Form>();
         while (true) {
             skipBlanks();
             if (pos >= source.length()) {
-                throw new MocljException("Unexpected end of input, expected ')'");
+                throw new MocljException("Unexpected end of input, expected '" + close + "'");
             }
-            if (source.charAt(pos) == ')') {
+            if (source.charAt(pos) == close) {
                 pos++;
-                return new Form.Seq(items);
+                return items;
             }
             items.add(readForm());
         }
@@ -96,6 +100,6 @@ public final class Reader {
     }
 
     private static boolean isTerminator(char c) {
-        return Character.isWhitespace(c) || c == '(' || c == ')' || c == ',' || c == ';';
+        return Character.isWhitespace(c) || c == '(' || c == ')' || c == '[' || c == ']' || c == ',' || c == ';';
     }
 }
