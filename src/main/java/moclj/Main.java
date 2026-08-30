@@ -12,7 +12,9 @@ public final class Main {
             "(def x 10)",
             "(def y 20)",
             "(+ x y)",
-            "(* x 5)");
+            "(* x 5)",
+            "(def x 100)",
+            "(+ x y)");
 
     private Main() {
     }

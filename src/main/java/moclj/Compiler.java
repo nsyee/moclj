@@ -10,15 +10,21 @@ import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.MethodHandles;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.SequencedMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /// Compiles a [Form] into a fresh class whose static `invoke()` method evaluates
 /// it, then loads and runs that class.
 ///
-/// Each input gets its own class, so nothing is shared through fields; state is
-/// shared exclusively through [RT]'s static Var registry, reached with
-/// `invokestatic` instructions emitted by [#compileNode].
+/// Every name a form reads gets a `private static final Var` field. The
+/// generated `<clinit>` resolves each of them once, through [RT#var], and a
+/// symbol reference then compiles to `getstatic` plus [Var#deref] - no lookup by
+/// name happens while the method runs. Because the cached field holds the
+/// container and not the value, a later `(def x ...)` is visible to classes that
+/// were compiled before it, without recompiling them.
 public final class Compiler {
 
     /// Lookup of this class, hence generated classes land in package `moclj`
@@ -28,9 +34,10 @@ public final class Compiler {
     private static final AtomicInteger CLASS_COUNTER = new AtomicInteger();
 
     private static final String INVOKE_METHOD = "invoke";
+    private static final String FIELD_PREFIX = "VAR_";
     private static final MethodTypeDesc INVOKE_DESC = MethodTypeDesc.of(CD_Object);
-    private static final MethodTypeDesc BIND_DESC = MethodTypeDesc.of(CD_Object, CD_String, CD_Object);
-    private static final MethodTypeDesc GET_DESC = MethodTypeDesc.of(CD_Object, CD_String);
+    private static final MethodTypeDesc VAR_DESC = MethodTypeDesc.of(Var.CLASS_DESC, CD_String);
+    private static final MethodTypeDesc DEF_DESC = MethodTypeDesc.of(Var.CLASS_DESC, CD_String, CD_Object);
     private static final MethodTypeDesc INVOKE_OP_DESC = MethodTypeDesc.of(CD_Object, CD_String, CD_Object, CD_Object);
     private static final MethodTypeDesc BOX_LONG_DESC = MethodTypeDesc.of(ConstantDescs.CD_Long, CD_long);
 
@@ -39,8 +46,18 @@ public final class Compiler {
 
     /// Compiles and immediately evaluates `form`, the "eval" of the REPL.
     public static Object eval(Form form) {
+        return invoke(compileToClass(form));
+    }
+
+    /// Compiles `form` and loads the result, so that the very same class can be
+    /// invoked again later against whatever its cached Vars hold by then.
+    public static Class<?> compileToClass(Form form) {
         String className = nextClassName();
-        Class<?> compiled = load(className, compile(form, className));
+        return load(className, compile(form, className));
+    }
+
+    /// Runs the `invoke()` method of a class produced by [#compileToClass].
+    public static Object invoke(Class<?> compiled) {
         try {
             return compiled.getMethod(INVOKE_METHOD).invoke(null);
         } catch (ReflectiveOperationException e) {
@@ -48,7 +65,7 @@ public final class Compiler {
             if (cause instanceof RuntimeException runtime) {
                 throw runtime;
             }
-            throw new MocljException("Failed to evaluate " + form, e);
+            throw new MocljException("Failed to invoke " + compiled.getName(), e);
         }
     }
 
@@ -58,14 +75,34 @@ public final class Compiler {
     }
 
     private static byte[] compile(Form form, String className) {
-        return ClassFile.of().build(ClassDesc.of(className), classBuilder -> {
+        ClassDesc classDesc = ClassDesc.of(className);
+        SequencedMap<String, String> varFields = varFields(form);
+        return ClassFile.of().build(classDesc, classBuilder -> {
             classBuilder.withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL | ClassFile.ACC_SUPER);
+            varFields.values().forEach(field -> classBuilder.withField(
+                    field,
+                    Var.CLASS_DESC,
+                    ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_FINAL));
+            if (!varFields.isEmpty()) {
+                classBuilder.withMethodBody(
+                        ConstantDescs.CLASS_INIT_NAME,
+                        ConstantDescs.MTD_void,
+                        ClassFile.ACC_STATIC,
+                        code -> {
+                            varFields.forEach((name, field) -> {
+                                code.loadConstant(name);
+                                code.invokestatic(RT.CLASS_DESC, "var", VAR_DESC);
+                                code.putstatic(classDesc, field, Var.CLASS_DESC);
+                            });
+                            code.return_();
+                        });
+            }
             classBuilder.withMethodBody(
                     INVOKE_METHOD,
                     INVOKE_DESC,
                     ClassFile.ACC_PUBLIC | ClassFile.ACC_STATIC,
                     code -> {
-                        compileNode(form, code);
+                        compileNode(form, code, classDesc, varFields);
                         code.areturn();
                     });
         });
@@ -79,16 +116,51 @@ public final class Compiler {
         }
     }
 
+    /// Resolves every name `form` reads to the field that will cache its Var,
+    /// keeping the order in which the names occur.
+    private static SequencedMap<String, String> varFields(Form form) {
+        var fields = new LinkedHashMap<String, String>();
+        collectReferences(form, fields);
+        return fields;
+    }
+
+    private static void collectReferences(Form form, Map<String, String> fields) {
+        switch (form) {
+            case Form.Sym(String name) -> {
+                if (RT.lookupVar(name) == null) {
+                    throw new MocljException("Unable to resolve symbol: " + name + " in this context");
+                }
+                fields.computeIfAbsent(name, Compiler::fieldName);
+            }
+            case Form.Num _ -> {
+            }
+            case Form.Seq(List<Form> items) when items.isEmpty() ->
+                throw new MocljException("Cannot compile an empty form");
+            case Form.Seq(List<Form> items) -> {
+                if (items.getFirst() instanceof Form.Sym(String op)) {
+                    // The head names a special form or an operator, not a Var,
+                    // and `def` binds its symbol rather than reading it.
+                    int firstArg = op.equals("def") ? 2 : 1;
+                    items.subList(Math.min(firstArg, items.size()), items.size())
+                            .forEach(item -> collectReferences(item, fields));
+                } else {
+                    items.forEach(item -> collectReferences(item, fields));
+                }
+            }
+        }
+    }
+
     /// Emits the instructions leaving exactly one `Object` on the operand stack.
-    private static void compileNode(Form form, CodeBuilder code) {
+    private static void compileNode(
+            Form form, CodeBuilder code, ClassDesc classDesc, Map<String, String> varFields) {
         switch (form) {
             case Form.Num(long value) -> {
                 code.loadConstant(value);
                 code.invokestatic(ConstantDescs.CD_Long, "valueOf", BOX_LONG_DESC);
             }
             case Form.Sym(String name) -> {
-                code.loadConstant(name);
-                code.invokestatic(RT.CLASS_DESC, "get", GET_DESC);
+                code.getstatic(classDesc, varFields.get(name), Var.CLASS_DESC);
+                code.invokevirtual(Var.CLASS_DESC, "deref", Var.DEREF_DESC);
             }
             case Form.Seq(List<Form> items) when items.isEmpty() ->
                 throw new MocljException("Cannot compile an empty form");
@@ -97,33 +169,50 @@ public final class Compiler {
                     throw new MocljException("Can only invoke symbols but got: " + items.getFirst());
                 }
                 if (op.equals("def")) {
-                    compileDef(items, code);
+                    compileDef(items, code, classDesc, varFields);
                 } else {
-                    compileOp(op, items, code);
+                    compileOp(op, items, code, classDesc, varFields);
                 }
             }
         }
     }
 
-    /// `(def name value)` becomes `RT.bind("name", <value>)`.
-    private static void compileDef(List<Form> items, CodeBuilder code) {
+    /// `(def name value)` becomes `RT.def("name", <value>)`, which leaves the
+    /// Var on the stack.
+    private static void compileDef(
+            List<Form> items, CodeBuilder code, ClassDesc classDesc, Map<String, String> varFields) {
         if (items.size() != 3 || !(items.get(1) instanceof Form.Sym(String name))) {
             throw new MocljException("def expects a symbol and a value: " + new Form.Seq(items));
         }
         code.loadConstant(name);
-        compileNode(items.get(2), code);
-        code.invokestatic(RT.CLASS_DESC, "bind", BIND_DESC);
+        compileNode(items.get(2), code, classDesc, varFields);
+        code.invokestatic(RT.CLASS_DESC, "def", DEF_DESC);
     }
 
     /// `(op a b)` becomes `RT.invokeOp("op", <a>, <b>)`.
-    private static void compileOp(String op, List<Form> items, CodeBuilder code) {
+    private static void compileOp(
+            String op, List<Form> items, CodeBuilder code, ClassDesc classDesc, Map<String, String> varFields) {
         if (items.size() != 3) {
             throw new MocljException("Wrong number of args (" + (items.size() - 1) + ") passed to: " + op);
         }
         code.loadConstant(op);
-        compileNode(items.get(1), code);
-        compileNode(items.get(2), code);
+        compileNode(items.get(1), code, classDesc, varFields);
+        compileNode(items.get(2), code, classDesc, varFields);
         code.invokestatic(RT.CLASS_DESC, "invokeOp", INVOKE_OP_DESC);
+    }
+
+    /// Field names have to be readable Java identifiers, so characters a symbol
+    /// may contain but a field name may not are escaped by code point.
+    private static String fieldName(String symbol) {
+        var name = new StringBuilder(FIELD_PREFIX);
+        symbol.codePoints().forEach(codePoint -> {
+            if (Character.isJavaIdentifierPart(codePoint)) {
+                name.appendCodePoint(codePoint);
+            } else {
+                name.append('_').append(Integer.toHexString(codePoint)).append('_');
+            }
+        });
+        return name.toString();
     }
 
     private static String nextClassName() {

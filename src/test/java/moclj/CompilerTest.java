@@ -1,6 +1,7 @@
 package moclj;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,8 +20,10 @@ class CompilerTest {
     }
 
     @Test
-    void defReturnsTheBoundValue() {
-        assertEquals(10L, eval("(def x 10)"));
+    void defReturnsTheVarItself() {
+        Object result = eval("(def x 10)");
+        assertEquals(RT.lookupVar("x"), result);
+        assertEquals("#'user/x", result.toString());
         assertEquals(10L, RT.lookupVar("x").deref());
     }
 
@@ -42,9 +45,21 @@ class CompilerTest {
     }
 
     @Test
-    void unresolvedSymbolsFail() {
+    void alreadyCompiledClassesSeeRedefinitions() {
+        eval("(def x 10)");
+        eval("(def y 20)");
+        Class<?> sum = Compiler.compileToClass(Reader.readOne("(+ x y)"));
+        assertEquals(30L, Compiler.invoke(sum));
+
+        eval("(def x 100)");
+        assertEquals(120L, Compiler.invoke(sum));
+    }
+
+    @Test
+    void unresolvedSymbolsFailBeforeTheClassIsBuilt() {
         MocljException e = assertThrows(MocljException.class, () -> eval("missing"));
         assertTrue(e.getMessage().contains("Unable to resolve symbol: missing"));
+        assertNull(RT.lookupVar("missing"));
     }
 
     @Test
@@ -66,9 +81,22 @@ class CompilerTest {
     }
 
     @Test
-    void generatedBytecodeCallsTheRuntimeRegistry() {
+    void symbolReferencesReadVarsCachedInStaticFields() {
+        eval("(def x 10)");
+        eval("(def y 20)");
         String bytecode = Disassembler.disassemble(Compiler.compile(Reader.readOne("(+ x y)")));
+        assertTrue(bytecode.contains("moclj/RT.var(Ljava/lang/String;)Lmoclj/Var;"), bytecode);
+        assertTrue(bytecode.contains("PUTSTATIC"), bytecode);
+        assertTrue(bytecode.contains("GETSTATIC"), bytecode);
+        assertTrue(bytecode.contains("moclj/Var.deref()Ljava/lang/Object;"), bytecode);
         assertTrue(bytecode.contains("invokeOp"), bytecode);
-        assertTrue(bytecode.contains("get"), bytecode);
+    }
+
+    @Test
+    void symbolsThatAreNotIdentifiersGetEscapedFieldNames() {
+        eval("(def a-b 1)");
+        assertEquals(1L, eval("a-b"));
+        assertTrue(
+                Disassembler.disassemble(Compiler.compile(Reader.readOne("a-b"))).contains("VAR_a_2d_b"));
     }
 }
