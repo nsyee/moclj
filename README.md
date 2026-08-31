@@ -18,8 +18,12 @@ Values, by contrast, are never mutated: `[1 2 3]` is a persistent vector, and
 
 ## Requirements
 
-JDK 26. With [mise](https://mise.jdx.dev) installed, `mise install` picks up the
-toolchain pinned in `mise.toml`.
+The build runs on any JDK that Gradle 9 supports and provisions JDK 26 for
+compiling and running the code itself: the
+[Foojay toolchain resolver](https://github.com/gradle/foojay-toolchains) in
+`settings.gradle.kts` downloads a JDK 26 toolchain on demand. To use a locally
+managed JDK 26 instead, [mise](https://mise.jdx.dev) picks up the toolchain
+pinned in `mise.toml` with `mise install`.
 
 ## Usage
 
